@@ -114,7 +114,9 @@ func (prwe *prweWAL) retrieveWALIndices() (err error) {
 	if err != nil {
 		return fmt.Errorf("prometheusremotewriteexporter: failed to retrieve the first WAL index: %w", err)
 	}
-	prwe.rWALIndex.Store(rIndex)
+	if prwe.rWALIndex.Load() < rIndex {
+		prwe.rWALIndex.Store(rIndex)
+	}
 
 	wIndex, err := prwe.wal.LastIndex()
 	if err != nil {
@@ -163,17 +165,8 @@ func (prwe *prweWAL) run(ctx context.Context) (err error) {
 			case <-prwe.stopChan:
 				return
 			default:
-				err := prwe.continuallyPopWALThenExport(runCtx, signalStart)
+				_ = prwe.continuallyPopWALThenExport(runCtx, signalStart)
 				signalStart = func() {}
-				if err != nil {
-					// log err
-					logger.Error("error processing WAL entries", zap.Error(err))
-					// Restart WAL
-					if errS := prwe.retrieveWALIndices(); errS != nil {
-						logger.Error("unable to re-start write-ahead log after error", zap.Error(errS))
-						return
-					}
-				}
 			}
 		}
 	}()
@@ -191,6 +184,9 @@ func (prwe *prweWAL) continuallyPopWALThenExport(ctx context.Context, signalStar
 	defer func() {
 		// Keeping it within a closure to ensure that the later
 		// updated value of reqL is always flushed to disk.
+		if err != nil {
+			return
+		}
 		if errL := prwe.exportSink(ctx, reqL); errL != nil {
 			err = multierr.Append(err, errL)
 		}
@@ -286,7 +282,6 @@ func (prwe *prweWAL) exportThenFrontTruncateWAL(ctx context.Context, reqL []*pro
 	if cErr := ctx.Err(); cErr != nil {
 		return nil
 	}
-
 	if errL := prwe.exportSink(ctx, reqL); errL != nil {
 		return errL
 	}
@@ -350,6 +345,7 @@ func (prwe *prweWAL) readPrompbFromWAL(ctx context.Context, index uint64) (wreq 
 
 			// Now increment the WAL's read index.
 			prwe.rWALIndex.Add(1)
+			println(prwe.rWALIndex.Load())
 
 			return req, nil
 		}
