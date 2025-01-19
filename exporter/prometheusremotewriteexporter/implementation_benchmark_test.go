@@ -29,8 +29,9 @@ import (
 )
 
 func BenchmarkImplementations(b *testing.B) {
-	seriesCount := atomic.Uint32{}
+	seriesCount := atomic.Uint64{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.Helper()
 		defer r.Body.Close()
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -47,7 +48,7 @@ func BenchmarkImplementations(b *testing.B) {
 		}
 		require.NotEmpty(b, req.Timeseries)
 		for _, ts := range req.Timeseries {
-			seriesCount.Add(uint32(len(ts.Samples)))
+			seriesCount.Add(uint64(len(ts.Samples)))
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -58,27 +59,33 @@ func BenchmarkImplementations(b *testing.B) {
 		send func(m pmetric.Metrics)
 		name string
 	}
+	seriesCount.Store(0)
+
 	tests := []tt{
 		{
 			send: buildPR(b, srv),
 			name: "existing_prometheusremotewriteexporter",
 		},
 		{
+
 			send: buildWalQueue(b, srv),
 			name: "new_walqueue",
 		},
 	}
 	for _, test := range tests {
+		seriesCount.Store(0)
 		b.Run(test.name, func(b *testing.B) {
+			b.ResetTimer()
 			runs := 0
 			for i := 0; i < b.N; i++ {
 				test.send(intSumBatch)
-				require.Eventually(b, func() bool {
-					return seriesCount.Load() == 2002
-				}, 5*time.Second, 100*time.Millisecond)
 				runs++
-				seriesCount.Store(0)
 			}
+			require.Eventually(b, func() bool {
+				return seriesCount.Load() == uint64(2002*runs)
+			}, 5*time.Second, 100*time.Millisecond)
+			seriesCount.Store(0)
+
 		})
 	}
 
@@ -163,11 +170,17 @@ func buildWalQueue(b *testing.B, srv *httptest.Server) func(m pmetric.Metrics) {
 	b.Cleanup(func() {
 		q.Stop()
 	})
-	// Only using prwe here to ensure we use the same exporter settings
-	prwe := createPR(b, srv)
 	return func(m pmetric.Metrics) {
 		app := q.Appender(context.Background())
-		tsMap, err := prometheusremotewrite.FromMetrics(m, prwe.exporterSettings)
+		// These settings mirror the default of prwe
+		tsMap, err := prometheusremotewrite.FromMetrics(m, prometheusremotewrite.Settings{
+			Namespace:           "",
+			ExternalLabels:      nil,
+			DisableTargetInfo:   false,
+			ExportCreatedMetric: true,
+			AddMetricSuffixes:   false,
+			SendMetadata:        false,
+		})
 		for _, ts := range tsMap {
 			lbls := make(labels.Labels, len(ts.Labels))
 			for i, lbl := range ts.Labels {
@@ -185,5 +198,4 @@ func buildWalQueue(b *testing.B, srv *httptest.Server) func(m pmetric.Metrics) {
 		err = app.Commit()
 		require.NoError(b, err)
 	}
-
 }
