@@ -5,7 +5,10 @@ package prometheusremotewriteexporter
 
 import (
 	"context"
+	"fmt"
+	"go.uber.org/zap"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -148,4 +151,69 @@ func TestWAL_persist(t *testing.T) {
 	orderByLabelValueForEach(reqLFromWAL)
 	require.Equal(t, reqLFromWAL[0], reqL[0])
 	require.Equal(t, reqLFromWAL[1], reqL[1])
+}
+
+func TestWal(t *testing.T) {
+
+}
+
+func TestWALDuplicateDataPrevention(t *testing.T) {
+	// Create a temporary directory for WAL
+	config := &WALConfig{
+		Directory:         t.TempDir(),
+		BufferSize:        1,
+		TruncateFrequency: 1 * time.Second,
+	}
+
+	// Track exported requests to detect duplicates
+	ids := make(map[string]prompb.TimeSeries)
+	exportSink := func(_ context.Context, reqL []*prompb.WriteRequest) error {
+		for _, req := range reqL {
+			for _, ts := range req.Timeseries {
+				if _, found := ids[ts.Labels[0].Name]; found {
+					t.Errorf("duplicate data prevents duplicate label %q", ts.Labels[0].Name)
+				}
+				ids[ts.Labels[0].Name] = ts
+			}
+		}
+		return nil
+	}
+
+	// Create WAL with custom export sink
+	pwal := newWAL(config, exportSink)
+	require.NotNil(t, pwal)
+
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	nop := zap.NewNop()
+	ctx = contextWithLogger(ctx, nop)
+	err := pwal.run(ctx)
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		// Persist duplicate requests to WAL
+		require.NoError(t, pwal.persistToWAL(makeReq(i)))
+
+	}
+
+	require.Eventuallyf(t, func() bool {
+		return len(ids) == 10*100 // i * j
+	}, 5*time.Second, 100*time.Millisecond, "exported count expected 1_000, received %d", len(ids))
+
+	// The context cancel has to be called so the mutex isnt continually locked on stop.
+	cancel()
+	// Stop WAL
+	require.NoError(t, pwal.stop())
+}
+
+func makeReq(i int) []*prompb.WriteRequest {
+	wr := make([]*prompb.WriteRequest, 0)
+	for j := 0; j < 1; j++ {
+		ts := &prompb.TimeSeries{
+			Labels:  []prompb.Label{{Name: fmt.Sprintf("test_metric_%d_%d", j, i), Value: strconv.Itoa(i)}},
+			Samples: []prompb.Sample{{Value: 42, Timestamp: time.Now().UnixNano()}},
+		}
+		wr = append(wr, &prompb.WriteRequest{Timeseries: []prompb.TimeSeries{*ts}})
+	}
+	return wr
 }

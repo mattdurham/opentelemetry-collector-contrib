@@ -28,6 +28,8 @@ import (
 	"time"
 )
 
+var intSumBatch = testdata.GenerateMetricsManyMetricsSameResource(1_000)
+
 func BenchmarkImplementations(b *testing.B) {
 	seriesCount := atomic.Uint64{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +55,6 @@ func BenchmarkImplementations(b *testing.B) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	intSumBatch := testdata.GenerateMetricsManyMetricsSameResource(1_000)
 
 	type tt struct {
 		send func(m pmetric.Metrics)
@@ -63,19 +64,20 @@ func BenchmarkImplementations(b *testing.B) {
 
 	tests := []tt{
 		{
-			send: buildPR(b, srv),
-			name: "existing_prometheusremotewriteexporter",
-		},
-		{
 
 			send: buildWalQueue(b, srv),
 			name: "new_walqueue",
+		},
+		{
+			send: buildPR(b, srv),
+			name: "existing_prometheusremotewriteexporter",
 		},
 	}
 	for _, test := range tests {
 		seriesCount.Store(0)
 		b.Run(test.name, func(b *testing.B) {
 			b.ResetTimer()
+			seriesCount.Store(0)
 			runs := 0
 			for i := 0; i < b.N; i++ {
 				test.send(intSumBatch)
@@ -161,7 +163,7 @@ func buildWalQueue(b *testing.B, srv *httptest.Server) func(m pmetric.Metrics) {
 	q, err := prometheus.NewQueue("test", types.ConnectionConfig{
 		URL:           srv.URL,
 		Timeout:       1 * time.Second,
-		BatchCount:    100,
+		BatchCount:    1_000,
 		FlushInterval: 500 * time.Millisecond,
 		Connections:   2,
 	}, b.TempDir(), 100, 100*time.Millisecond, 1*time.Hour, prom.NewRegistry(), "test", log.NewNopLogger())
